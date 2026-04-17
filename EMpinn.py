@@ -77,6 +77,8 @@ DILATIONS = [1, 2, 4, 8]
 KERNEL_SIZE = 3
 HIDDEN_DIM = 64
 DROPOUT = 0.1
+DELTA_LOSS_LAMBDA = 0.3
+RESIDUAL_SCALE = 0.5
 
 # 物理分支（可学习参数）
 # 注意：原始玻尔兹曼常数（J/K）若直接代入会导致 exp 指数项数值灾难。
@@ -220,7 +222,10 @@ class EMPINN(nn.Module):
         seq = x.squeeze(-1)
         p, p_out = self.phys(seq)
         z = torch.cat([h, p, p_out], dim=-1)
-        y = self.fusion(z)
+        # 残差式输出：预测相对最后一个观测点的增量，降低“阶梯直线”风险
+        delta = self.fusion(z)
+        last = x[:, -1, :]
+        y = last + RESIDUAL_SCALE * delta
         return y
 
 
@@ -237,7 +242,9 @@ class DataDrivenOnly(nn.Module):
 
     def forward(self, x):
         h = self.extractor(x)
-        y = self.head(h)
+        delta = self.head(h)
+        last = x[:, -1, :]
+        y = last + RESIDUAL_SCALE * delta
         return y
 
 
@@ -264,6 +271,20 @@ def iterative_forecast(model: nn.Module,
 def freeze_module(module: nn.Module, requires_grad: bool):
     for p in module.parameters():
         p.requires_grad = requires_grad
+
+
+def compute_total_loss(pred: torch.Tensor,
+                       yb: torch.Tensor,
+                       xb: torch.Tensor,
+                       criterion: nn.Module,
+                       delta_lambda: float = DELTA_LOSS_LAMBDA) -> torch.Tensor:
+    """数据项 + 增量项联合损失，增强趋势跟踪能力。"""
+    data_loss = criterion(pred, yb)
+    last = xb[:, -1, :]
+    pred_delta = pred - last
+    true_delta = yb - last
+    delta_loss = criterion(pred_delta, true_delta)
+    return data_loss + delta_lambda * delta_loss
 
 
 # =================== 分段训练（含三阶段） ===================
@@ -297,7 +318,7 @@ def train_one_segment_and_select_best(train_raw: np.ndarray,
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             opt1.zero_grad()
             pred = dd_model(xb)
-            loss = criterion(pred, yb)
+            loss = compute_total_loss(pred, yb, xb, criterion)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(dd_model.parameters(), max_norm=1.0)
             opt1.step()
@@ -336,7 +357,7 @@ def train_one_segment_and_select_best(train_raw: np.ndarray,
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             opt2.zero_grad()
             pred = model(xb)
-            loss = criterion(pred, yb)
+            loss = compute_total_loss(pred, yb, xb, criterion)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(params2, max_norm=1.0)
             opt2.step()
@@ -374,7 +395,7 @@ def train_one_segment_and_select_best(train_raw: np.ndarray,
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             opt3.zero_grad()
             pred = model(xb)
-            loss = criterion(pred, yb)
+            loss = compute_total_loss(pred, yb, xb, criterion)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt3.step()
