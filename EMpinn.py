@@ -79,9 +79,11 @@ HIDDEN_DIM = 64
 DROPOUT = 0.1
 
 # 物理分支（可学习参数）
+# 注意：原始玻尔兹曼常数（J/K）若直接代入会导致 exp 指数项数值灾难。
+# 这里采用电化学常用的 eV/K 量纲，避免 D≈0 引发发散和“直线预测”。
 INIT_EA = 0.122
 INIT_D0 = 1.0
-KB = 1.380649e-23
+KB = 8.617333262e-5  # eV/K
 
 # ============= 输出目录 =============
 BASE_DIR = 'EMpinn_results_模型验证对比'
@@ -182,7 +184,11 @@ class PhysicsBranch(nn.Module):
 
         ea = torch.exp(self.log_Ea)
         d0 = torch.exp(self.log_D0)
-        d = d0 * torch.exp(-ea / (KB * t_kelvin + 1e-12))
+        # 数值稳定：限制指数输入范围，避免 underflow/overflow
+        exponent = -ea / (KB * t_kelvin + 1e-12)
+        exponent = torch.clamp(exponent, min=-60.0, max=20.0)
+        d = d0 * torch.exp(exponent)
+        d = torch.clamp(d, min=1e-8, max=1e8)
 
         p = self.pi_dense(d)
         empirical = self.c_param / (d + 1e-12) + self.b_param
@@ -293,6 +299,7 @@ def train_one_segment_and_select_best(train_raw: np.ndarray,
             pred = dd_model(xb)
             loss = criterion(pred, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(dd_model.parameters(), max_norm=1.0)
             opt1.step()
             losses.append(loss.item())
 
@@ -331,6 +338,7 @@ def train_one_segment_and_select_best(train_raw: np.ndarray,
             pred = model(xb)
             loss = criterion(pred, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(params2, max_norm=1.0)
             opt2.step()
             losses.append(loss.item())
 
@@ -350,7 +358,8 @@ def train_one_segment_and_select_best(train_raw: np.ndarray,
     freeze_module(model.extractor, True)
     freeze_module(model.phys, True)
     freeze_module(model.fusion, True)
-    opt3 = optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    # 联合训练阶段适当减小学习率，避免后期震荡为“常数预测”
+    opt3 = optim.Adam(model.parameters(), lr=LR * 0.3, weight_decay=WEIGHT_DECAY)
 
     best_state = None
     best_mse = float('inf')
@@ -367,6 +376,7 @@ def train_one_segment_and_select_best(train_raw: np.ndarray,
             pred = model(xb)
             loss = criterion(pred, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt3.step()
             losses.append(loss.item())
 
