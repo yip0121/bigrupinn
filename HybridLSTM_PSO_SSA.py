@@ -61,9 +61,12 @@ SEGMENTS = [60, 60, 120, 120, 400, 400]
 EARLY_STOP_PATIENCE = 0
 
 # ============= 搜参与训练参数 =============
-PSO_POP = 12
-PSO_ITERS = 8
-FINAL_EPOCHS_LIMIT = 120
+# Fast mode: 明显加速对比实验（推荐先用 Fast 跑完所有模型，再对少数模型开 Full）
+FAST_MODE = True
+PSO_POP = 6 if FAST_MODE else 12
+PSO_ITERS = 3 if FAST_MODE else 8
+FINAL_EPOCHS_LIMIT = 60 if FAST_MODE else 120
+FITNESS_EPOCH_CAP = 25 if FAST_MODE else 80
 WEIGHT_DECAY = 1e-7
 
 # ============= VMD 后端 =============
@@ -196,8 +199,16 @@ class PSOSSA:
         return np.clip(x, low, high)
 
     def optimize(self):
+        cache = {}
+
+        def eval_cached(x):
+            key = tuple(np.round(x, 4))
+            if key not in cache:
+                cache[key] = float(self.fitness_fn(x))
+            return cache[key]
+
         pop, vel = self.init()
-        fit = np.array([self.fitness_fn(p) for p in pop])
+        fit = np.array([eval_cached(p) for p in pop])
         pbest, pbest_fit = pop.copy(), fit.copy()
         gidx = int(np.argmin(fit))
         gbest, gbest_fit = pop[gidx].copy(), float(fit[gidx])
@@ -233,14 +244,14 @@ class PSOSSA:
                 beta = self.rng.normal(0, 1, size=self.dim)
                 pop[i] = self.clip(gbest + beta * np.abs(gbest - pop[i]))
 
-            fit = np.array([self.fitness_fn(p) for p in pop])
+            fit = np.array([eval_cached(p) for p in pop])
 
             selected = self.rng.choice(self.pop_size, size=n_danger, replace=False)
             if float(np.std(fit[selected])) < 0.1:
                 worst = pop[int(np.argmax(fit))].copy()
                 for i in selected:
                     pop[i] = self.clip(pop[i] + self.rng.uniform(-1, 1, size=self.dim) * np.abs(pop[i] - worst))
-                fit = np.array([self.fitness_fn(p) for p in pop])
+                fit = np.array([eval_cached(p) for p in pop])
 
             improved = fit < pbest_fit
             pbest[improved] = pop[improved]
@@ -271,6 +282,10 @@ def decode_sol(sol: np.ndarray) -> Dict:
 
 def train_eval_one_setting(train_raw: np.ndarray, param: Dict) -> float:
     """在训练集尾部切 val，返回 val mse（原始尺度）。"""
+    # Fast mode 下只用最近一段历史做搜参，速度明显提升
+    if FAST_MODE and len(train_raw) > 700:
+        train_raw = train_raw[-700:]
+
     n = len(train_raw)
     split = max(int(n * 0.85), param["n_steps"] + 8)
     split = min(split, n - 4)
@@ -290,7 +305,7 @@ def train_eval_one_setting(train_raw: np.ndarray, param: Dict) -> float:
     opt = optim.Adam(model.parameters(), lr=param["lr"], weight_decay=WEIGHT_DECAY)
     crit = nn.MSELoss()
 
-    for _ in range(min(param["epochs"], 80)):
+    for _ in range(min(param["epochs"], FITNESS_EPOCH_CAP)):
         model.train()
         for xb, yb in dl:
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
@@ -423,6 +438,7 @@ def main():
 
     print(f"Dataset Tag: {DATASET_TAG}")
     print(f"Output Dir: {BASE_DIR}")
+    print(f"FAST_MODE: {FAST_MODE} | PSO_POP={PSO_POP}, PSO_ITERS={PSO_ITERS}, FITNESS_EPOCH_CAP={FITNESS_EPOCH_CAP}")
     print(f"Total: {N}, Init Train: {initial_end}")
     print("Segments:", segments)
 
