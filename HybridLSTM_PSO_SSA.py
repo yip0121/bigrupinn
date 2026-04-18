@@ -99,15 +99,31 @@ def run_vmd(signal: np.ndarray, K: int, alpha: float) -> np.ndarray:
     K = int(max(2, min(8, round(K))))
     alpha = float(max(100.0, min(3000.0, alpha)))
 
+    sig = signal.astype(np.float64)
+
     if HAS_VMDPY:
         tau, DC, init, tol = 0.0, 0, 1, 1e-7
-        u, _, omega = VMD(signal.astype(np.float64), alpha, tau, K, DC, init, tol)
+        u, _, omega = VMD(sig, alpha, tau, K, DC, init, tol)
+        order = np.argsort(omega)
+        keep = order[: max(1, K // 2 + 1)]
+        recon = u[keep].sum(axis=0)
     else:
-        u, _, omega = simple_vmd_fallback(signal, K=K)
+        # 无 vmdpy 时用稳定平滑替代，避免“伪VMD”导致幅值错位
+        win = max(5, 2 * K + 1)
+        kernel = np.ones(win) / win
+        recon = np.convolve(sig, kernel, mode="same")
 
-    order = np.argsort(omega)
-    keep = order[: max(1, K // 2 + 1)]
-    recon = u[keep].sum(axis=0)
+    # 幅值对齐：避免 VMD/平滑后尺度漂移，导致反归一化出现异常大波动
+    recon_std = float(np.std(recon))
+    sig_std = float(np.std(sig))
+    if recon_std > 1e-12 and sig_std > 1e-12:
+        recon = (recon - np.mean(recon)) / recon_std * sig_std + np.mean(sig)
+    else:
+        recon = recon + (np.mean(sig) - np.mean(recon))
+
+    lo, hi = float(np.min(sig)), float(np.max(sig))
+    pad = max((hi - lo) * 0.1, 1e-6)
+    recon = np.clip(recon, lo - pad, hi + pad)
     return recon.astype(np.float32)
 
 
@@ -153,8 +169,9 @@ def iterative_forecast(model: nn.Module,
         for _ in range(n_steps):
             x = torch.from_numpy(cur).unsqueeze(0).float().to(device)
             nxt = model(x).cpu().numpy()
-            preds_scaled.append(nxt[0, 0])
-            cur = np.concatenate([cur[1:], nxt.reshape(1, 1)], axis=0)
+            nxt_val = float(np.clip(nxt[0, 0], -0.2, 1.2))
+            preds_scaled.append(nxt_val)
+            cur = np.concatenate([cur[1:], np.array([[nxt_val]], dtype=np.float32)], axis=0)
     preds_scaled = np.asarray(preds_scaled).reshape(-1, 1)
     return scaler.inverse_transform(preds_scaled).flatten()
 
