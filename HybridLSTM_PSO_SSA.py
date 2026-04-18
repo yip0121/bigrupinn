@@ -68,6 +68,8 @@ PSO_ITERS = 3 if FAST_MODE else 8
 FINAL_EPOCHS_LIMIT = 60 if FAST_MODE else 120
 FITNESS_EPOCH_CAP = 25 if FAST_MODE else 80
 WEIGHT_DECAY = 1e-7
+RESIDUAL_SCALE = 0.6
+DELTA_LOSS_LAMBDA = 0.25
 
 # ============= VMD 后端 =============
 try:
@@ -142,7 +144,9 @@ class HybridLSTM(nn.Module):
         out = self.drop1(out)
         out, _ = self.lstm2(out)
         out = self.drop2(out[:, -1, :])
-        return self.fc(out)
+        delta = self.fc(out)
+        last = x[:, -1, :]
+        return last + RESIDUAL_SCALE * delta
 
 
 def create_sequences(data_scaled: np.ndarray, n_steps: int):
@@ -174,6 +178,20 @@ def iterative_forecast(model: nn.Module,
             cur = np.concatenate([cur[1:], np.array([[nxt_val]], dtype=np.float32)], axis=0)
     preds_scaled = np.asarray(preds_scaled).reshape(-1, 1)
     return scaler.inverse_transform(preds_scaled).flatten()
+
+
+def compute_total_loss(pred: torch.Tensor,
+                       yb: torch.Tensor,
+                       xb: torch.Tensor,
+                       criterion: nn.Module,
+                       delta_lambda: float = DELTA_LOSS_LAMBDA) -> torch.Tensor:
+    """联合损失：绝对值误差 + 增量误差，增强趋势拟合。"""
+    data_loss = criterion(pred, yb)
+    last = xb[:, -1, :]
+    pred_delta = pred - last
+    true_delta = yb - last
+    delta_loss = criterion(pred_delta, true_delta)
+    return data_loss + delta_lambda * delta_loss
 
 
 # ================= PSO-SSA =================
@@ -328,7 +346,7 @@ def train_eval_one_setting(train_raw: np.ndarray, param: Dict) -> float:
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             opt.zero_grad()
             pred = model(xb)
-            loss = crit(pred, yb)
+            loss = compute_total_loss(pred, yb, xb, crit)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
@@ -387,7 +405,7 @@ def train_one_segment_and_select_best(train_raw: np.ndarray,
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             opt.zero_grad()
             pred = model(xb)
-            loss = crit(pred, yb)
+            loss = compute_total_loss(pred, yb, xb, crit)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
