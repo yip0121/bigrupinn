@@ -15,6 +15,7 @@ import os
 import time
 import math
 import random
+import re
 from typing import Tuple, Dict, List
 
 import numpy as np
@@ -88,7 +89,21 @@ INIT_D0 = 1.0
 KB = 8.617333262e-5  # eV/K
 
 # ============= 输出目录 =============
-BASE_DIR = 'EMpinn_results_模型验证对比'
+def infer_dataset_tag(path: str) -> str:
+    """
+    从数据文件名中推断数据集标签：
+    - 包含 36ah / 30ah 等，返回对应标签
+    - 未匹配则返回 unknown
+    """
+    name = os.path.basename(path).lower()
+    m = re.search(r'(\\d+ah)', name)
+    if m:
+        return m.group(1)
+    return "unknown"
+
+
+DATASET_TAG = infer_dataset_tag(DATA_FILE)
+BASE_DIR = f'{DATASET_TAG}_EMpinn_results_模型验证对比'
 CKPT_DIR = os.path.join(BASE_DIR, 'checkpoints')
 RES_DIR = os.path.join(BASE_DIR, 'results')
 IMG_DIR = os.path.join(BASE_DIR, 'images')
@@ -447,6 +462,8 @@ def main():
     t0 = time.time()
 
     series_raw = cp_load_column_from_excel(DATA_FILE, TREND_COL_INDEX, sheet_name=SHEET_NAME)
+    print(f"Dataset Tag: {DATASET_TAG}")
+    print(f"Output Dir: {BASE_DIR}")
     N = len(series_raw)
     initial_end, segments = cp_normalize_segments(N, INITIAL_TRAIN_RATIO, SEGMENTS)
     print(f"Total: {N}, Init Train: {initial_end}")
